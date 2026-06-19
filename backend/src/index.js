@@ -73,11 +73,11 @@ app.post('/api/llm/query', async (req, res) => {
 
   try {
     // 로컬 Ollama 서버에 비동기 요청 시도
-    const response = await fetch('http://localhost:11434/api/generate', {
+    const response = await fetch('http://192.168.1.197:11434/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'gemma2:9b', // 기본적으로 gemma2:9b 타겟
+        model: 'llama3.2:1b', // 기본적으로 llama3.2:1b 타겟
         prompt: `${systemMessage}\n\n질문: ${prompt}\n\n답변:`,
         stream: false
       }),
