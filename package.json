@@ -1,0 +1,14 @@
+{
+  "name": "119onepass-prototype-root",
+  "version": "1.0.0",
+  "description": "119원패스 AI 플랫폼 프로토타입 통합 프로젝트",
+  "scripts": {
+    "install:all": "npm install --prefix backend && npm install --prefix frontend",
+    "dev:backend": "npm run dev --prefix backend",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "start": "npx concurrently \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
