@@ -8,7 +8,17 @@ RUN npm run build
 
 # 2단계: 실행 스테이지 (Nginx)
 FROM nginx:alpine
-# React 빌드 결과물인 dist(또는 build) 폴더를 Nginx 웹 루트로 복사
 COPY --from=builder /app/dist /usr/share/nginx/html
+
+# 💡 이 부분이 핵심입니다! React 라우터가 작동하도록 Nginx 기본 설정을 덮어씁니다.
+RUN echo 'server { \
+    listen 80; \
+    location / { \
+        root /usr/share/nginx/html; \
+        index index.html index.htm; \
+        try_files $uri $uri/ /index.html; \
+    } \
+}' > /etc/nginx/conf.d/default.conf
+
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
