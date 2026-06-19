@@ -77,7 +77,7 @@ app.post('/api/llm/query', async (req, res) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'gemma:2b', // 기본적으로 llama3.2:1b 타겟
+        model: 'gemma4:e2b', // 기본적으로 llama3.2:1b 타겟
         prompt: `${systemMessage}\n\n질문: ${prompt}\n\n답변:`,
         stream: false
       }),
