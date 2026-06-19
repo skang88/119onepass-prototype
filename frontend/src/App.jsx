@@ -52,7 +52,7 @@ export default function App() {
 
   // 1. 기초 데이터 로드 및 초기 분석 수행
   useEffect(() => {
-    fetch('/api/scenario')
+    fetch('/backend/api/scenario')
       .then(res => res.json())
       .then(data => {
         setScenarioData(data);
@@ -249,7 +249,7 @@ export default function App() {
     if (!data) return;
     
     // Route Analysis API 호출
-    fetch('/api/analyze/route', {
+    fetch('/backend/api/analyze/route', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ roadWidth: width, vehicleType: vehicle })
@@ -258,7 +258,7 @@ export default function App() {
     .then(resData => setRouteResult(resData));
 
     // Hose Count Analysis API 호출
-    fetch('/api/analyze/hose', {
+    fetch('/backend/api/analyze/hose', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ hydrantDistance: hDist, firePointDistance: fDist })
@@ -297,7 +297,7 @@ export default function App() {
     setIsChatLoading(true);
 
     try {
-      const response = await fetch('/api/llm/query', {
+      const response = await fetch('/backend/api/llm/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: userMessage })
