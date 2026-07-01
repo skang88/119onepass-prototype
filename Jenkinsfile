@@ -52,7 +52,7 @@ pipeline {
                 // 2. 새롭게 빌드된 이미지로 컨테이너를 실행합니다.
                 // 포트는 사용하시는 환경에 맞게 변경하셔도 됩니다. (예: 백엔드 5000, 프론트엔드 3000)
                 sh "docker run -d --name ${BACKEND_CONTAINER} -p 5000:5000 ${BACKEND_IMAGE}"
-                sh "docker run -d --name ${FRONTEND_CONTAINER} -p 3001:80 ${FRONTEND_IMAGE}"
+                sh "docker run -d --name ${FRONTEND_CONTAINER} -p 5173:80 ${FRONTEND_IMAGE}"
                 
                 echo '배포가 완료되었습니다!'
             }

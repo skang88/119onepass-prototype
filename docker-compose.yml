@@ -1,0 +1,24 @@
+services:
+  express-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: express-backend
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://100.98.209.0/ollama}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    restart: always
+
+  react-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: react-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - express-backend
+    restart: always

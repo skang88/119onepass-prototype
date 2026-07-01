@@ -10,15 +10,8 @@ RUN npm run build
 FROM nginx:alpine
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# 💡 이 부분이 핵심입니다! React 라우터가 작동하도록 Nginx 기본 설정을 덮어씁니다.
-RUN echo 'server { \
-    listen 80; \
-    location / { \
-        root /usr/share/nginx/html; \
-        index index.html index.htm; \
-        try_files $uri $uri/ /index.html; \
-    } \
-}' > /etc/nginx/conf.d/default.conf
+# Nginx 설정을 덮어씁니다 (React 라우터 대응 및 API 프록시 설정 포함)
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
