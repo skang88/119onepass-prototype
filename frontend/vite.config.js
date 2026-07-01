@@ -10,6 +10,11 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:5000', // localhost 대신 127.0.0.1 명시 (Node.js IPv6 해소용)
         changeOrigin: true,
+      },
+      '/backend': {
+        target: 'http://127.0.0.1:5000',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/backend/, '')
       }
     }
   }

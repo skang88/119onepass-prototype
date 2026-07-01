@@ -12,7 +12,15 @@ import {
   Play, 
   MessageSquare, 
   Send, 
-  PhoneCall 
+  PhoneCall,
+  Mic,
+  MicOff,
+  Volume2,
+  VolumeX,
+  Settings,
+  Sparkles,
+  X,
+  Square
 } from 'lucide-react';
 
 export default function App() {
@@ -38,6 +46,382 @@ export default function App() {
   const [radioLogs, setRadioLogs] = useState([]);
   const [isRadioLoading, setIsRadioLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('summary'); // summary vs logs
+
+  // Theme State (dark vs light)
+  const [theme, setTheme] = useState(() => localStorage.getItem('onepass_theme') || 'dark');
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('onepass_theme', theme);
+  }, [theme]);
+
+  // AI Model & API Key Configuration State
+  const [modelType, setModelType] = useState(() => localStorage.getItem('onepass_model_type') || 'local');
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('onepass_gemini_api_key') || '');
+  const [localEndpoint, setLocalEndpoint] = useState(() => localStorage.getItem('onepass_local_endpoint') || 'http://100.98.209.0/ollama');
+  const [localModel, setLocalModel] = useState(() => localStorage.getItem('onepass_local_model') || 'gemma4:e2b');
+  const [ollamaStatus, setOllamaStatus] = useState('idle'); // 'idle' | 'checking' | 'running' | 'failed'
+  const [ollamaModels, setOllamaModels] = useState([]);
+  const [ollamaError, setOllamaError] = useState('');
+  const [showSettings, setShowSettings] = useState(false);
+
+  // Gemini Live Voice Interface State
+  const [isVoiceActive, setIsVoiceActive] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState('idle'); // 'idle' | 'listening' | 'thinking' | 'speaking'
+  const [voiceUserTranscript, setVoiceUserTranscript] = useState('');
+  const [voiceAiResponse, setVoiceAiResponse] = useState('');
+
+  const recognitionRef = useRef(null);
+  const synthRef = useRef(window.speechSynthesis);
+  const utteranceRef = useRef(null);
+  const speechTimeoutRef = useRef(null);
+
+  // Latest Ref Pattern to prevent SpeechRecognition recreating cycle
+  const modelTypeRef = useRef(modelType);
+  const apiKeyRef = useRef(apiKey);
+  const radioLogsRef = useRef(radioLogs);
+  const localEndpointRef = useRef(localEndpoint);
+  const localModelRef = useRef(localModel);
+
+  useEffect(() => { modelTypeRef.current = modelType; }, [modelType]);
+  useEffect(() => { apiKeyRef.current = apiKey; }, [apiKey]);
+  useEffect(() => { radioLogsRef.current = radioLogs; }, [radioLogs]);
+  useEffect(() => { localEndpointRef.current = localEndpoint; }, [localEndpoint]);
+  useEffect(() => { localModelRef.current = localModel; }, [localModel]);
+
+  // Speech Recognition & Text-To-Speech Setup
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let rec = null;
+
+    if (SpeechRecognition) {
+      rec = new SpeechRecognition();
+      rec.continuous = true; // 지속 리스닝
+      rec.lang = 'ko-KR';
+      rec.interimResults = true; // 실시간 중간 받아쓰기 활성화
+      rec.maxAlternatives = 1;
+
+      rec.onstart = () => {
+        setVoiceStatus('listening');
+        setVoiceUserTranscript('현장 지휘 내용을 말씀하십시오...');
+        setVoiceAiResponse('');
+      };
+
+      rec.onerror = (e) => {
+        console.error("음성 인식 에러: ", e);
+        if (speechTimeoutRef.current) clearTimeout(speechTimeoutRef.current);
+        setVoiceStatus('idle');
+        if (e.error === 'no-speech') {
+          setVoiceUserTranscript('음성이 감지되지 않았습니다. 다시 마이크를 누르고 말씀해 주십시오.');
+        } else if (e.error === 'not-allowed') {
+          setVoiceUserTranscript('⚠️ 마이크 권한이 차단되었습니다. 주소창 왼쪽 자물쇠 아이콘을 눌러 권한을 허용해 주십시오.');
+        } else {
+          setVoiceUserTranscript(`⚠️ 음성 인식 오류: ${e.error}. 다시 말씀해 보십시오.`);
+        }
+      };
+
+      rec.onend = () => {
+        setVoiceStatus(prev => {
+          if (prev === 'listening') return 'idle';
+          return prev;
+        });
+      };
+
+      rec.onresult = async (event) => {
+        // 기존 디바운스 타이머 리셋
+        if (speechTimeoutRef.current) {
+          clearTimeout(speechTimeoutRef.current);
+        }
+
+        let finalTranscript = '';
+        let interimTranscript = '';
+
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalTranscript += event.results[i][0].transcript;
+          } else {
+            interimTranscript += event.results[i][0].transcript;
+          }
+        }
+
+        const combinedTranscript = (finalTranscript || interimTranscript).trim();
+        if (!combinedTranscript) return;
+
+        // 지휘관 자막 박스에 타이핑 피드백 노출
+        setVoiceUserTranscript(combinedTranscript);
+
+        // 1.2초 동안 조용하면 최종 구문으로 판단하여 백엔드 분석 요청
+        speechTimeoutRef.current = setTimeout(async () => {
+          try {
+            rec.stop(); // 캡처 종료
+          } catch (e) {}
+          setVoiceStatus('thinking');
+
+          // [즉시 피드백] 말을 마치자마자 우측 Q&A 챗 일지에 유저 질문(STT 결과)을 바로 받아쓰기 표기합니다.
+          setChatHistory(prev => [...prev, { sender: 'user', text: combinedTranscript }]);
+          setIsChatLoading(true);
+
+          try {
+            const response = await fetch('/backend/api/llm/query', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ 
+                prompt: combinedTranscript,
+                modelType: modelTypeRef.current,
+                apiKey: apiKeyRef.current,
+                radioLogs: radioLogsRef.current,
+                localEndpoint: localEndpointRef.current,
+                localModel: localModelRef.current
+              })
+            });
+
+            if (!response.ok) {
+              throw new Error("서버 통신 실패");
+            }
+
+            // 대화창에 빈 AI 메시지 공간 확보
+            setChatHistory(prev => [...prev, { sender: 'ai', text: '', source: '연결 중...' }]);
+            setIsChatLoading(false);
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let done = false;
+            let accumulatedText = "";
+            let finalSource = "AI Assistant";
+            let streamBuffer = ""; // 쪼개진 chunk 조립용 버퍼
+
+            while (!done) {
+              const { value, done: doneReading } = await reader.read();
+              done = doneReading;
+              if (value) {
+                streamBuffer += decoder.decode(value, { stream: true });
+                const parts = streamBuffer.split('\n\n');
+                streamBuffer = parts.pop() || ""; // 미완성 조각은 잔류
+
+                for (const part of parts) {
+                  const trimmed = part.trim();
+                  if (!trimmed) continue;
+
+                  const lines = trimmed.split('\n');
+                  for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                      try {
+                        const parsed = JSON.parse(line.slice(6));
+                        if (parsed.text) {
+                          accumulatedText += parsed.text;
+                          finalSource = parsed.source;
+
+                          // 화면 아래쪽 자막 실시간 업데이트
+                          setVoiceAiResponse(accumulatedText);
+
+                          // 우측 채팅 로그 실시간 업데이트
+                          setChatHistory(prev => {
+                            const newHistory = [...prev];
+                            if (newHistory.length > 0) {
+                              newHistory[newHistory.length - 1] = {
+                                sender: 'ai',
+                                text: accumulatedText,
+                                source: finalSource
+                              };
+                            }
+                            return newHistory;
+                          });
+                        }
+                      } catch (e) {
+                        // 조각 파싱 오류 무시
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            // 루프 종료 후 버퍼 잔류분 강제 플러시
+            if (streamBuffer.trim()) {
+              const lines = streamBuffer.trim().split('\n');
+              for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                  try {
+                    const parsed = JSON.parse(line.slice(6));
+                    if (parsed.text) {
+                      accumulatedText += parsed.text;
+                      finalSource = parsed.source;
+                      setVoiceAiResponse(accumulatedText);
+                      setChatHistory(prev => {
+                        const newHistory = [...prev];
+                        if (newHistory.length > 0) {
+                          newHistory[newHistory.length - 1] = {
+                            sender: 'ai',
+                            text: accumulatedText,
+                            source: finalSource
+                          };
+                        }
+                        return newHistory;
+                      });
+                    }
+                  } catch (e) {}
+                }
+              }
+            }
+
+            // 스트리밍이 완료된 텍스트를 음성(TTS)으로 재생
+            speakText(accumulatedText);
+
+          } catch (err) {
+            console.error(err);
+            setIsChatLoading(false);
+            setVoiceStatus('idle');
+            setVoiceAiResponse(`⚠️ 연결 오류: ${err.message}`);
+            
+            // 통신 에러 발생 시, 챗 일지 영역에도 에러 사유를 붉게 각인하여 굳음 현상을 방지합니다.
+            setChatHistory(prev => [...prev, 
+              { sender: 'ai', text: `⚠️ AI 서비스 통신 실패: 로컬 LLM 서버 연결 오류. (${err.message})`, source: "System Warning" }
+            ]);
+
+            speakText("AI 서비스 연결에 실패했습니다. 모델 설정을 확인하십시오.");
+          }
+        }, 1200);
+      };
+
+      recognitionRef.current = rec;
+    }
+
+    return () => {
+      if (speechTimeoutRef.current) {
+        clearTimeout(speechTimeoutRef.current);
+      }
+      if (rec) {
+        try {
+          rec.abort();
+        } catch (err) {
+          console.error("음성 인식 정리 오류: ", err);
+        }
+      }
+    };
+  }, []);
+
+  const speakText = (text) => {
+    if (!synthRef.current) return;
+
+    synthRef.current.cancel();
+
+    // Clean markdown characters or prefix strings to make Speech synthesis cleaner
+    const cleanedText = text
+      .replace(/\[가상 AI 보조엔진 안내\]/g, '')
+      .replace(/출처: [^\n]+/g, '')
+      .replace(/[\*#`\-]/g, '')
+      .replace(/[\d]\./g, '') // remove numbered list prefix dots
+      .trim();
+
+    const utterance = new SpeechSynthesisUtterance(cleanedText);
+    utterance.lang = 'ko-KR';
+
+    // Find a good Korean voice if available
+    const voices = synthRef.current.getVoices();
+    const koVoice = voices.find(v => v.lang === 'ko-KR' || v.lang.startsWith('ko'));
+    if (koVoice) {
+      utterance.voice = koVoice;
+    }
+
+    utterance.onstart = () => {
+      setVoiceStatus('speaking');
+    };
+
+    utterance.onend = () => {
+      setVoiceStatus('idle');
+    };
+
+    utterance.onerror = (e) => {
+      console.error("TTS 재생 오류: ", e);
+      setVoiceStatus('idle');
+    };
+
+    utteranceRef.current = utterance;
+    synthRef.current.speak(utterance);
+  };
+
+  const startVoiceInteraction = () => {
+    if (synthRef.current) {
+      synthRef.current.cancel();
+    }
+    if (recognitionRef.current) {
+      try {
+        // 이미 진행 중인 인식을 중단시켜 중복 충돌을 방지합니다.
+        recognitionRef.current.abort();
+      } catch (e) {}
+
+      // 브라우저 리소스 정리 시간을 고려하여 50ms 대기 후 새로 기동합니다.
+      setTimeout(() => {
+        try {
+          recognitionRef.current.start();
+        } catch (err) {
+          console.log("음성 인식 시작 실패: ", err);
+        }
+      }, 50);
+    }
+  };
+
+  const stopVoiceInteraction = () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.abort();
+    }
+    if (synthRef.current) {
+      synthRef.current.cancel();
+    }
+    setVoiceStatus('idle');
+  };
+
+  const deactivateVoiceMode = () => {
+    stopVoiceInteraction();
+    setIsVoiceActive(false);
+  };
+
+  const handleModelTypeChange = (val) => {
+    setModelType(val);
+    localStorage.setItem('onepass_model_type', val);
+  };
+
+  const handleApiKeyChange = (val) => {
+    setApiKey(val);
+    localStorage.setItem('onepass_gemini_api_key', val);
+  };
+
+  const checkOllamaStatus = async (endpointToCheck = localEndpoint) => {
+    setOllamaStatus('checking');
+    setOllamaError('');
+    try {
+      const response = await fetch('/backend/api/ollama/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpoint: endpointToCheck })
+      });
+      const data = await response.json();
+      if (data.status === 'running') {
+        setOllamaStatus('running');
+        setOllamaModels(data.models || []);
+        if (data.models && data.models.length > 0) {
+          // If the currently saved model is not in the fetched list, select the first one.
+          if (!data.models.includes(localModel)) {
+            const firstModel = data.models[0];
+            setLocalModel(firstModel);
+            localStorage.setItem('onepass_local_model', firstModel);
+          }
+        }
+      } else {
+        setOllamaStatus('failed');
+        setOllamaError(data.error || '접근이 불가합니다.');
+      }
+    } catch (err) {
+      setOllamaStatus('failed');
+      setOllamaError(err.message || '네트워크 오류가 발생했습니다.');
+    }
+  };
+
+  useEffect(() => {
+    if (showSettings && modelType === 'local') {
+      checkOllamaStatus(localEndpoint);
+    }
+  }, [showSettings, modelType]);
 
   // 3-Layer 토글 상태
   const [layersVisibility, setLayersVisibility] = useState({
@@ -79,8 +463,12 @@ export default function App() {
       zoomControl: false
     });
 
-    // 다크 모드 타일레이어 설정 (CartoDB Dark Matter)
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    // 테마에 따른 타일레이어 설정
+    const tileUrl = theme === 'dark'
+      ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+      : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
+
+    L.tileLayer(tileUrl, {
       attribution: '&copy; CartoDB'
     }).addTo(map);
 
@@ -100,7 +488,7 @@ export default function App() {
         mapInstance.current = null;
       }
     };
-  }, []);
+  }, [theme]);
 
   // 3. 레이어 토글 및 시나리오 데이터 변경 시 마커 갱신
   useEffect(() => {
@@ -300,15 +688,104 @@ export default function App() {
       const response = await fetch('/backend/api/llm/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: userMessage })
+        body: JSON.stringify({ 
+          prompt: userMessage,
+          modelType: modelType,
+          apiKey: apiKey,
+          radioLogs: radioLogs,
+          localEndpoint: localEndpoint,
+          localModel: localModel
+        })
       });
-      const data = await response.json();
-      setChatHistory(prev => [...prev, { sender: 'ai', text: data.response, source: data.source }]);
+
+      if (!response.ok) {
+        throw new Error("서버 통신 실패");
+      }
+
+      // 대화 로그에 빈 AI 응답 슬롯 추가
+      setChatHistory(prev => [...prev, { sender: 'ai', text: '', source: '연결 중...' }]);
+      setIsChatLoading(false);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let done = false;
+      let accumulatedText = "";
+      let finalSource = "AI Assistant";
+      let streamBuffer = ""; // 쪼개진 chunk 조립용 버퍼
+
+      while (!done) {
+        const { value, done: doneReading } = await reader.read();
+        done = doneReading;
+        if (value) {
+          streamBuffer += decoder.decode(value, { stream: true });
+          const parts = streamBuffer.split('\n\n');
+          streamBuffer = parts.pop() || ""; // 미완성 조각 보존
+
+          for (const part of parts) {
+            const trimmed = part.trim();
+            if (!trimmed) continue;
+
+            const lines = trimmed.split('\n');
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const parsed = JSON.parse(line.slice(6));
+                  if (parsed.text) {
+                    accumulatedText += parsed.text;
+                    finalSource = parsed.source;
+                    
+                    setChatHistory(prev => {
+                      const newHistory = [...prev];
+                      if (newHistory.length > 0) {
+                        newHistory[newHistory.length - 1] = {
+                          sender: 'ai',
+                          text: accumulatedText,
+                          source: finalSource
+                        };
+                      }
+                      return newHistory;
+                    });
+                  }
+                } catch (e) {
+                  // 조각 파싱 에러 스킵
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // 최종 잔류 버퍼 처리
+      if (streamBuffer.trim()) {
+        const lines = streamBuffer.trim().split('\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const parsed = JSON.parse(line.slice(6));
+              if (parsed.text) {
+                accumulatedText += parsed.text;
+                finalSource = parsed.source;
+                setChatHistory(prev => {
+                  const newHistory = [...prev];
+                  if (newHistory.length > 0) {
+                    newHistory[newHistory.length - 1] = {
+                      sender: 'ai',
+                      text: accumulatedText,
+                      source: finalSource
+                    };
+                  }
+                  return newHistory;
+                });
+              }
+            } catch (e) {}
+          }
+        }
+      }
+
     } catch (err) {
       console.error(err);
-      setChatHistory(prev => [...prev, { sender: 'ai', text: "네트워크 오류가 발생했습니다. 백엔드 서버 상태를 확인해 주십시오." }]);
-    } finally {
       setIsChatLoading(false);
+      setChatHistory(prev => [...prev, { sender: 'ai', text: `⚠️ AI 서비스 통신 실패: ${err.message}`, source: "Error State" }]);
     }
   };
 
@@ -325,9 +802,18 @@ export default function App() {
       const response = await fetch('/api/radio/summarize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ radioText })
+        body: JSON.stringify({ 
+          radioText,
+          modelType: modelType,
+          apiKey: apiKey,
+          localEndpoint: localEndpoint,
+          localModel: localModel
+        })
       });
       const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "요약 요청 실패");
+      }
       
       const newLog = {
         id: Date.now(),
@@ -341,6 +827,15 @@ export default function App() {
       setActiveTab('summary');
     } catch (err) {
       console.error(err);
+      const errorLog = {
+        id: Date.now(),
+        timestamp: new Date().toLocaleTimeString(),
+        rawText: radioText,
+        summary: `⚠️ 무전 요약 실패: ${err.message}`,
+        source: "Error State"
+      };
+      setRadioLogs(prev => [errorLog, ...prev]);
+      setActiveTab('summary');
     } finally {
       setIsRadioLoading(false);
     }
@@ -364,9 +859,194 @@ export default function App() {
           </div>
         </div>
         
-        <div className="status-badge">
-          <div className="status-indicator"></div>
-          <span>실시간 다기관 데이터 통합 관제 가동 중 (의령군 무곡마을 PoC)</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+          {/* AI Settings Container */}
+          <div className="settings-container">
+            <button className="btn-secondary settings-btn" onClick={() => setShowSettings(!showSettings)}>
+              <Settings size={16} />
+              <span>AI 모델: {modelType === 'gemini' ? 'Gemini API' : modelType === 'sandbox' ? 'Sandbox' : `Local (${localModel})`}</span>
+            </button>
+            
+            {showSettings && (
+              <div className="settings-dropdown glass-panel">
+                <h3>🤖 AI 모델 선택</h3>
+                <div className="settings-row" style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '16px' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', margin: 0 }}>
+                    <input 
+                      type="radio" 
+                      name="modelType" 
+                      value="local" 
+                      checked={modelType === 'local'} 
+                      onChange={() => handleModelTypeChange('local')}
+                    />
+                    <span>로컬 LLM (Ollama)</span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', margin: 0 }}>
+                    <input 
+                      type="radio" 
+                      name="modelType" 
+                      value="gemini" 
+                      checked={modelType === 'gemini'} 
+                      onChange={() => handleModelTypeChange('gemini')}
+                    />
+                    <span>Google Gemini API</span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', margin: 0 }}>
+                    <input 
+                      type="radio" 
+                      name="modelType" 
+                      value="sandbox" 
+                      checked={modelType === 'sandbox'} 
+                      onChange={() => handleModelTypeChange('sandbox')}
+                    />
+                    <span>가상 보조 엔진 (Sandbox)</span>
+                  </label>
+                </div>
+                
+                {modelType === 'gemini' && (
+                  <div className="api-key-input-container">
+                    <label htmlFor="apiKeyField">Google AI Studio API Key</label>
+                    <input 
+                      id="apiKeyField"
+                      type="password"
+                      placeholder="AIzaSy..."
+                      value={apiKey}
+                      onChange={(e) => handleApiKeyChange(e.target.value)}
+                      className="form-input"
+                    />
+                    <p className="settings-tip">입력된 API 키는 로컬 브라우저에 안전하게 저장됩니다.</p>
+                  </div>
+                )}
+
+                {modelType === 'local' && (
+                  <div className="local-model-settings" style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', marginTop: '12px' }}>
+                    <div className="form-group" style={{ marginBottom: '12px' }}>
+                      <label htmlFor="localEndpointField" style={{ display: 'block', fontSize: '12px', marginBottom: '4px', color: 'var(--text-sub)' }}>Ollama 엔드포인트 주소</label>
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <input 
+                          id="localEndpointField"
+                          type="text"
+                          placeholder="http://localhost:11434"
+                          value={localEndpoint}
+                          onChange={(e) => {
+                            setLocalEndpoint(e.target.value);
+                            localStorage.setItem('onepass_local_endpoint', e.target.value);
+                          }}
+                          className="form-input"
+                          style={{ flex: 1, fontSize: '13px', padding: '6px 8px' }}
+                        />
+                        <button 
+                          type="button" 
+                          className="btn-secondary" 
+                          onClick={() => checkOllamaStatus(localEndpoint)}
+                          style={{ fontSize: '12px', padding: '0 12px', whiteSpace: 'nowrap' }}
+                          disabled={ollamaStatus === 'checking'}
+                        >
+                          {ollamaStatus === 'checking' ? '조회중...' : '연결 확인'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ marginBottom: '12px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', marginBottom: '6px' }}>
+                        <span style={{ color: 'var(--text-sub)' }}>Ollama 상태:</span>
+                        {ollamaStatus === 'running' && (
+                          <span style={{ color: '#4caf50', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#4caf50', display: 'inline-block' }}></span>
+                            Running
+                          </span>
+                        )}
+                        {ollamaStatus === 'failed' && (
+                          <span style={{ color: '#f44336', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#f44336', display: 'inline-block' }}></span>
+                            Failed
+                          </span>
+                        )}
+                        {ollamaStatus === 'checking' && (
+                          <span style={{ color: '#ff9800', fontWeight: 'bold' }}>조회 중...</span>
+                        )}
+                        {ollamaStatus === 'idle' && (
+                          <span style={{ color: 'var(--text-sub)' }}>미조회 (연결 확인 필요)</span>
+                        )}
+                      </div>
+                      {ollamaError && (
+                        <div style={{ fontSize: '11px', color: '#ff3e3e', marginBottom: '8px', wordBreak: 'break-all' }}>
+                          ⚠️ {ollamaError}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="localModelSelect" style={{ display: 'block', fontSize: '12px', marginBottom: '4px', color: 'var(--text-sub)' }}>사용 가능 모델 선택</label>
+                      {ollamaStatus === 'running' && ollamaModels.length > 0 ? (
+                        <select
+                          id="localModelSelect"
+                          className="form-select"
+                          value={localModel}
+                          onChange={(e) => {
+                            setLocalModel(e.target.value);
+                            localStorage.setItem('onepass_local_model', e.target.value);
+                          }}
+                          style={{ fontSize: '13px', padding: '6px 8px', width: '100%' }}
+                        >
+                          {ollamaModels.map((model) => (
+                            <option key={model} value={model}>
+                              {model}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                          <input 
+                            id="localModelSelect"
+                            type="text"
+                            placeholder="gemma4:e2b"
+                            value={localModel}
+                            onChange={(e) => {
+                              setLocalModel(e.target.value);
+                              localStorage.setItem('onepass_local_model', e.target.value);
+                            }}
+                            className="form-input"
+                            style={{ fontSize: '13px', padding: '6px 8px' }}
+                          />
+                          <p style={{ fontSize: '11px', color: 'var(--text-sub)', margin: 0 }}>
+                            {ollamaStatus === 'running' ? '조회된 모델이 없습니다. 수동으로 모델명을 입력하세요.' : '서버 연결 후 모델을 선택하거나 수동 입력하세요.'}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Theme Toggle Button */}
+          <button 
+            className="btn-secondary" 
+            style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              justifyContent: 'center', 
+              padding: '8px', 
+              borderRadius: '50%', 
+              width: '36px', 
+              height: '36px',
+              border: '1px solid var(--border-color)',
+              background: 'rgba(255,255,255,0.05)',
+              color: 'var(--text-main)',
+              cursor: 'pointer'
+            }}
+            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            title={theme === 'dark' ? "라이트 모드로 전환" : "다크 모드로 전환"}
+          >
+            {theme === 'dark' ? <Sparkles size={16} style={{ color: 'var(--color-warning)' }} /> : <Flame size={16} style={{ color: 'var(--color-primary)' }} />}
+          </button>
+
+          <div className="status-badge">
+            <div className="status-indicator"></div>
+            <span>실시간 다기관 데이터 통합 관제 가동 중 (의령군 무곡마을 PoC)</span>
+          </div>
         </div>
       </header>
 
@@ -521,7 +1201,7 @@ export default function App() {
         <div ref={mapRef} style={{ height: '100%', width: '100%' }}></div>
         
         {/* Layer 3D Legend Map Overlay */}
-        <div className="map-layers-control glass-panel" style={{ background: 'rgba(10,13,20,0.85)' }}>
+        <div className="map-layers-control glass-panel">
           <div style={{ fontSize: '11px', fontWeight: 'bold', color: 'var(--color-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
             계층별 활성화 제어
           </div>
@@ -590,11 +1270,99 @@ export default function App() {
         </div>
 
         {/* AI 지휘 보조 챗봇 */}
-        <div className="glass-panel info-card" style={{ display: 'flex', flexDirection: 'column', flexGrow: 1 }}>
-          <h2 className="card-title">
-            <MessageSquare size={18} /> AI 현장 지휘대응 Q&A (Ollama 연동)
+        <div className="glass-panel info-card" style={{ display: 'flex', flexDirection: 'column', flex: '2 1 380px', position: 'relative', overflow: 'hidden', minHeight: '380px' }}>
+          <h2 className="card-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <MessageSquare size={18} /> AI 현장 지휘대응 Q&A
+            </span>
+            <button 
+              className="btn-voice-toggle" 
+              onClick={() => {
+                setIsVoiceActive(true);
+                startVoiceInteraction();
+              }}
+              title="음성 대화 모드 활성화"
+            >
+              <Sparkles size={14} className="sparkle-icon" />
+              <span>Live 음성 모드</span>
+            </button>
           </h2>
-          <div className="chat-container">
+
+          {/* Gemini Live Voice Overlay */}
+          {isVoiceActive && (
+            <div className="voice-overlay">
+              <div className="voice-header">
+                <div className="voice-title">
+                  <Sparkles size={18} style={{ color: 'var(--color-secondary)' }} />
+                  <h2>119원패스 Live 에이전트</h2>
+                </div>
+                <button className="voice-close-btn" onClick={deactivateVoiceMode} title="음성 모드 종료">
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="voice-visualizer-container">
+                <div className={`voice-glow-sphere ${voiceStatus}`}></div>
+                
+                {/* Waveform graphic when speaking */}
+                <div className={`waveform ${voiceStatus === 'speaking' ? 'active' : ''}`} style={{ opacity: voiceStatus === 'speaking' ? 1 : 0.1 }}>
+                  <div className="wave-bar"></div>
+                  <div className="wave-bar"></div>
+                  <div className="wave-bar"></div>
+                  <div className="wave-bar"></div>
+                  <div className="wave-bar"></div>
+                  <div className="wave-bar"></div>
+                  <div className="wave-bar"></div>
+                </div>
+              </div>
+
+              <div className="voice-transcript-box">
+                <div>
+                  <div className="transcript-label">지휘관 무전 내용 (STT)</div>
+                  <div className="user-transcript">
+                    {voiceUserTranscript || "마이크 버튼을 눌러 음성으로 지시하거나 상황을 물어보십시오."}
+                  </div>
+                </div>
+                {voiceAiResponse && (
+                  <div>
+                    <div className="transcript-label">AI 보조원 답변</div>
+                    <div className="ai-response">{voiceAiResponse}</div>
+                  </div>
+                )}
+              </div>
+
+              <div className="voice-controls">
+                <div className={`voice-status-text ${voiceStatus}`}>
+                  {voiceStatus === 'idle' && '대기 중 (마이크 클릭하여 말하기)'}
+                  {voiceStatus === 'listening' && '듣고 있습니다...'}
+                  {voiceStatus === 'thinking' && '분석 및 대응방안 검색 중...'}
+                  {voiceStatus === 'speaking' && '조언 안내 중...'}
+                </div>
+
+                <div style={{ display: 'flex', gap: '12px' }}>
+                  {voiceStatus === 'idle' ? (
+                    <button className="btn-voice-action idle" onClick={startVoiceInteraction}>
+                      <Mic size={24} />
+                    </button>
+                  ) : voiceStatus === 'speaking' ? (
+                    <button className="btn-voice-action speaking" onClick={stopVoiceInteraction}>
+                      <Square size={20} />
+                    </button>
+                  ) : voiceStatus === 'listening' ? (
+                    <button className="btn-voice-action listening" onClick={stopVoiceInteraction}>
+                      <MicOff size={24} />
+                    </button>
+                  ) : (
+                    <button className="btn-voice-action thinking" disabled>
+                      <Mic size={24} style={{ opacity: 0.5 }} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="chat-container" style={{ flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
             <div className="chat-history">
               {chatHistory.map((chat, idx) => (
                 <div key={idx} className={`chat-bubble ${chat.sender}`}>
@@ -626,7 +1394,7 @@ export default function App() {
         </div>
 
         {/* AI 무전 분석 & 요약 */}
-        <div className="glass-panel info-card">
+        <div className="glass-panel info-card" style={{ display: 'flex', flexDirection: 'column', flex: '0 0 auto', maxHeight: '280px', overflow: 'hidden' }}>
           <h2 className="card-title">
             <Radio size={18} /> 실시간 무전 관제 (STT 상황일지)
           </h2>
@@ -679,7 +1447,7 @@ export default function App() {
             </span>
           </div>
 
-          <div style={{ maxHeight: '180px', overflowY: 'auto' }}>
+          <div style={{ maxHeight: '100px', overflowY: 'auto', flexGrow: 1 }}>
             {activeTab === 'summary' ? (
               radioLogs.map(log => (
                 <div key={log.id} style={{ background: 'rgba(0,0,0,0.15)', padding: '8px', borderRadius: '6px', marginBottom: '8px', fontSize: '11px', borderLeft: '3px solid var(--color-primary)' }}>
